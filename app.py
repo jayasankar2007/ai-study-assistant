@@ -1,16 +1,16 @@
 import streamlit as st
 from google import genai
+from pypdf import PdfReader
 
 # Set up page configuration
-st.set_page_config(page_title="AI Study Assistant", page_icon="📚", layout="centered")
-st.title("📚 Your AI Study Assistant")
-st.caption("Upload your notes/textbook and ask anything!")
+st.set_page_config(page_title="AI PDF Study Assistant", page_icon="📚", layout="centered")
+st.title("📚 AI PDF Study Assistant")
+st.caption("Upload your PDFs and textbooks, then ask anything!")
 
-# 1. Securely fetch the API key from Streamlit secrets
+# Securely fetch the API key from Streamlit secrets
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
-    # Fallback to a sidebar input if not deployed yet
     api_key = st.sidebar.text_input("Enter Google Gemini API Key", type="password")
 
 if not api_key:
@@ -20,40 +20,54 @@ if not api_key:
 # Initialize the Gemini Client
 client = genai.Client(api_key=api_key)
 
-# 2. File Uploader Widget (Supports Text, Markdown, or Python files)
-uploaded_file = st.file_uploader("Upload your study document (.txt, .md, or .py)", type=["txt", "md", "py"])
+# Updated File Uploader to accept PDFs
+uploaded_file = st.file_uploader("Upload your study PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    # Read the text content of the uploaded file
-    document_content = uploaded_file.read().decode("utf-8")
-    st.success(f"Successfully loaded: '{uploaded_file.name}'!")
+    with st.spinner("Extracting text from PDF..."):
+        try:
+            # Read the PDF layers
+            pdf_reader = PdfReader(uploaded_file)
+            extracted_text = ""
+            
+            # Loop through pages and extract text
+            for page in pdf_reader.pages:
+                text = page.extract_text()
+                if text:
+                    extracted_text += text + "\n"
+            
+            st.success(f"Successfully processed: '{uploaded_file.name}' ({len(pdf_reader.pages)} pages)!")
+        except Exception as e:
+            st.error(f"Error reading PDF file: {e}")
+            st.stop()
     
-    # 3. User Question Input
-    user_question = st.text_input("Ask a question about this material:", placeholder="e.g., Summarize the main points.")
+    # User Question Input
+    user_question = st.text_input("Ask a question about this PDF:", placeholder="e.g., Explain the core concept of chapter 2.")
     
     if user_question:
-        with st.spinner("Analyzing your document and thinking..."):
+        with st.spinner("Analyzing document and generating answer..."):
             try:
-                # Structure the prompt to give context to the AI
+                # Structure the prompt with the extracted PDF content
                 prompt = f"""
-                You are a helpful academic tutor. Use the following uploaded study content to answer the user's question accurately.
+                You are a brilliant academic tutor. Use the following context extracted from a study PDF to answer the user's question accurately.
+                If the answer cannot be found in the text, use your general knowledge but mention that it wasn't explicitly in the document.
                 
-                --- STUDY CONTENT START ---
-                {document_content}
-                --- STUDY CONTENT END ---
+                --- STUDY PDF CONTENT START ---
+                {extracted_text}
+                --- STUDY PDF CONTENT END ---
                 
                 User Question: {user_question}
                 """
                 
-                # Generate response using the fast gemini-2.5-flash model
+                # Generate response using gemini-2.5-flash
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=prompt,
                 )
                 
-                # Display the answer nicely
+                # Display the answer
                 st.subheader("💡 Answer:")
                 st.write(response.text)
                 
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"An error occurred while generating the answer: {e}")
