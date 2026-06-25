@@ -1,11 +1,11 @@
 import streamlit as st
 from google import genai
-from pypdf import PdfReader
+import os
 
 # Set up page configuration
-st.set_page_config(page_title="AI Study Chatbot", page_icon="💬", layout="centered")
-st.title("💬 AI PDF Study Chatbot")
-st.caption("Upload a textbook or notes and have a conversation with an expert tutor.")
+st.set_page_config(page_title="Multimodal AI Study Hub", page_icon="🎓", layout="centered")
+st.title("🎓 Multimodal AI Study Hub")
+st.caption("Upload PDFs, Documents, Audio lectures, or Videos and talk to your personal tutor.")
 
 # Securely fetch the API key from Streamlit secrets
 if "GEMINI_API_KEY" in st.secrets:
@@ -20,93 +20,119 @@ if not api_key:
 # Initialize the Gemini Client
 client = genai.Client(api_key=api_key)
 
-# Initialize Chat History in Session State if it doesn't exist yet
+# Initialize persistent memory segments
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "active_file_ref" not in st.session_state:
+    st.session_state.active_file_ref = None
+if "text_context" not in st.session_state:
+    st.session_state.text_context = ""
 
-# Initialize PDF context memory
-if "pdf_text" not in st.session_state:
-    st.session_state.pdf_text = ""
-
-# Sidebar for uploading files (keeps main screen clean for chatting)
+# Sidebar logic for uploading ANY media type
 with st.sidebar:
-    st.header("📄 Upload Source")
-    uploaded_file = st.file_uploader("Upload your study PDF", type=["pdf"])
+    st.header("📂 Upload Study Materials")
+    uploaded_file = st.file_uploader(
+        "Supports PDF, TXT, Audio (MP3/WAV), or Video (MP4)", 
+        type=["pdf", "txt", "mp3", "wav", "mp4"]
+    )
     
     if uploaded_file is not None:
-        with st.spinner("Processing PDF layers..."):
-            try:
-                pdf_reader = PdfReader(uploaded_file)
-                extracted_text = ""
-                for page in pdf_reader.pages:
-                    text = page.extract_text()
-                    if text:
-                        extracted_text += text + "\n"
+        # Check if we've already uploaded this exact file to avoid double uploads
+        if "last_uploaded_name" not in st.session_state or st.session_state.last_uploaded_name != uploaded_file.name:
+            
+            with st.spinner(f"Processing and indexing '{uploaded_file.name}'..."):
+                file_ext = uploaded_file.name.split(".")[-1].lower()
                 
-                # Save text to state so it persists across refreshes
-                st.session_state.pdf_text = extracted_text
-                st.success(f"Loaded: {uploaded_file.name}")
+                # Clear previous session contexts cleanly
+                st.session_state.active_file_ref = None
+                st.session_state.text_context = ""
+                st.session_state.messages = []
                 
-                # Button to clear history if you upload a new file
-                if st.button("🔄 Clear Chat History"):
-                    st.session_state.messages = []
-                    st.rerun()
-                    
-            except Exception as e:
-                st.error(f"Error reading PDF: {e}")
+                try:
+                    # ROUTE A: Handle raw text structures or small code/notes files
+                    if file_ext in ["txt"]:
+                        st.session_state.text_context = uploaded_file.read().decode("utf-8")
+                        st.success("Loaded plain text file context successfully!")
+                        
+                    elif file_ext in ["pdf"]:
+                        from pypdf import PdfReader
+                        pdf_reader = PdfReader(uploaded_file)
+                        extracted_text = "".join([page.extract_text() or "" for page in pdf_reader.pages])
+                        st.session_state.text_context = extracted_text
+                        st.success(f"Extracted text from PDF ({len(pdf_reader.pages)} pages)!")
+                        
+                    # ROUTE B: Handle Heavy Audio/Video via the Files API
+                    elif file_ext in ["mp3", "wav", "mp4"]:
+                        # Save uploaded file temporarily to local disk so the SDK can push it
+                        temp_filename = f"temp_upload_source.{file_ext}"
+                        with open(temp_filename, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        
+                        # Upload using Google GenAI Files cloud infrastructure
+                        cloud_file = client.files.upload(file=temp_filename)
+                        st.session_state.active_file_ref = cloud_file
+                        
+                        # Clean up local temporary file
+                        if os.path.exists(temp_filename):
+                            os.remove(temp_filename)
+                            
+                        st.success("Media successfully uploaded and cached into Gemini Cloud! Ready to discuss.")
+                        
+                    st.session_state.last_uploaded_name = uploaded_file.name
+                except Exception as e:
+                    st.error(f"Failed to process file: {e}")
 
-# Display existing chat history from memory
+    if st.button("🔄 Clear Active Thread"):
+        st.session_state.messages = []
+        st.rerun()
+
+# Render active chat timeline UI
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input at the bottom of the screen
-if prompt := st.chat_input("Ask me anything about your document..."):
-    
-    # 1. Display user message instantly in chat
+# Main Chat loop
+if prompt := st.chat_input("Ask a question about your uploaded materials..."):
     with st.chat_message("user"):
         st.markdown(prompt)
-    # Add user message to history
     st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # 2. Check if a PDF has been uploaded
-    if not st.session_state.pdf_text:
+    
+    # Block requests if no content context exists
+    if not st.session_state.text_context and not st.session_state.active_file_ref:
         with st.chat_message("assistant"):
-            warning_msg = "Please upload a PDF in the sidebar first so I can analyze it!"
-            st.markdown(warning_msg)
-        st.session_state.messages.append({"role": "assistant", "content": warning_msg})
+            st.markdown("Please upload a file in the left sidebar configuration panel before chatting!")
         st.stop()
 
-    # 3. Generate response from Gemini
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        with st.spinner("Analyzing content timeline..."):
             try:
-                # We inject the PDF context AND the full historical thread into the system context
-                # To keep it efficient, we pass the PDF text as background instructions
-                context_prompt = f"""
-                You are a dedicated AI study tutor. You have access to an uploaded document. 
-                Use this context to answer the user's questions in a clear, academic, and supportive manner.
-                If the chat history shows previous questions, maintain continuity.
+                # Compile dynamic contents payloads depending on document type
+                payload_contents = []
                 
-                --- DOCUMENT CONTEXT ---
-                {st.session_state.pdf_text}
-                --- END DOCUMENT CONTEXT ---
+                # Append structural file cloud indicators if media track is active
+                if st.session_state.active_file_ref:
+                    payload_contents.append(st.session_state.active_file_ref)
                 
-                Current Question: {prompt}
+                # Inject prompt engineering block context
+                system_instruction = f"""
+                You are an expert multi-disciplinary university professor.
+                Analyze the attached media/document to provide structurally clear explanations, definitions, or code syntax where appropriate.
+                
+                Text Context (if applicable):
+                {st.session_state.text_context}
                 """
                 
-                # Build the chat payload including past user/assistant turns
-                # Note: For simple scripts, passing history inside the structure works wonderfully
+                payload_contents.append(system_instruction)
+                payload_contents.append(f"User Query: {prompt}")
+                
+                # Run content evaluation via modern gemini-2.5-flash
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
-                    contents=context_prompt,
+                    contents=payload_contents,
                 )
                 
-                # Display response
                 st.markdown(response.text)
-                
-                # Save assistant response to history
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
                 
             except Exception as e:
-                st.error(f"Error calling Gemini API: {e}")
+                st.error(f"API Generation Error: {e}")
